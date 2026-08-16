@@ -1,0 +1,25 @@
+{
+  "name": "flyrank-scraper",
+  "version": "1.0.0",
+  "description": "Scraper",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nayan-mia-09/flyrank-scraper.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/nayan-mia-09/flyrank-scraper/issues"
+  },
+  "homepage": "https://github.com/nayan-mia-09/flyrank-scraper#readme",
+  "dependencies": {
+    "cheerio": "^1.2.0",
+    "zod": "^4.4.3"
+  }
+}
