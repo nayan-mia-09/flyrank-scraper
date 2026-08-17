@@ -8,6 +8,12 @@ const USER_AGENT = 'FlyRankInternshipA9/1.0 (+https://github.com/nayan-mia-09/fl
 const DELAY_MS = 500;
 const MAX_PAGES = 3;
 
+// Set to true to deliberately test failure-handling with one fake URL (Stage 5 checkpoint)
+const INJECT_FAKE_URL_FOR_TESTING = false;
+
+let cacheHitCount = 0;
+let fetchCount = 0;
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -19,11 +25,14 @@ function cachePathForUrl(url) {
   return path.join('cache', fileName);
 }
 
-async function fetchWithCache(url) {
+// Fetches a URL with caching, timeout, and a single retry for timeouts/5xx errors.
+// 404 and 403 are NOT retried — asking again won't fix those.
+async function fetchWithCache(url, attempt = 1) {
   const cachePath = cachePathForUrl(url);
 
   if (fs.existsSync(cachePath)) {
     const html = fs.readFileSync(cachePath, 'utf-8');
+    cacheHitCount++;
     console.log(`CACHE HIT — ${cachePath} (${html.length} bytes)`);
     return html;
   }
@@ -31,18 +40,44 @@ async function fetchWithCache(url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
 
-  const response = await fetch(url, {
-    headers: { 'User-Agent': USER_AGENT },
-    signal: controller.signal
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: { 'User-Agent': USER_AGENT },
+      signal: controller.signal
+    });
+  } catch (networkErr) {
+    clearTimeout(timeout);
+    if (attempt < 2) {
+      console.log(`RETRY (timeout/network) — ${url}`);
+      await sleep(1000);
+      return fetchWithCache(url, attempt + 1);
+    }
+    throw new Error(`Network/timeout error after retry: ${networkErr.message}`);
+  }
   clearTimeout(timeout);
 
+  if (response.status === 404) {
+    throw new Error(`404 Not Found — page does not exist, will not retry`);
+  }
+  if (response.status === 403) {
+    throw new Error(`403 Forbidden — site declined, will not retry`);
+  }
+  if (response.status >= 500) {
+    if (attempt < 2) {
+      console.log(`RETRY (${response.status}) — ${url}`);
+      await sleep(1000);
+      return fetchWithCache(url, attempt + 1);
+    }
+    throw new Error(`Server error ${response.status} after retry`);
+  }
   if (response.status !== 200) {
-    throw new Error(`Fetch failed with status ${response.status} for ${url}`);
+    throw new Error(`Unexpected status ${response.status}`);
   }
 
   const html = await response.text();
   fs.writeFileSync(cachePath, html);
+  fetchCount++;
   console.log(`FETCH — ${url} (${html.length} bytes)`);
 
   await sleep(DELAY_MS);
@@ -53,7 +88,7 @@ async function fetchWithCache(url) {
 // Stage 2: discover book links across the first 3 catalogue pages
 async function discoverAllBookLinks() {
   const seen = new Set();
-  const bookEntries = []; // { url, sourcePage }
+  const bookEntries = [];
   let currentUrl = START_URL;
   let pageCount = 0;
 
@@ -74,6 +109,13 @@ async function discoverAllBookLinks() {
 
     const nextHref = $('li.next a').attr('href');
     currentUrl = (nextHref && pageCount < MAX_PAGES) ? new URL(nextHref, currentUrl).href : null;
+  }
+
+  if (INJECT_FAKE_URL_FOR_TESTING) {
+    bookEntries.push({
+      url: 'https://books.toscrape.com/catalogue/this-book-does-not-exist_9999/index.html',
+      sourcePage: START_URL
+    });
   }
 
   return { pageCount, bookEntries };
@@ -165,15 +207,24 @@ function normalizeAndValidate(rawRecords) {
 }
 
 async function main() {
+  const startTime = Date.now();
+  const failedPages = [];
+
   const { pageCount, bookEntries } = await discoverAllBookLinks();
   console.log(`catalogue_pages=${pageCount}`);
   console.log(`discovered=${bookEntries.length}`);
   console.log(`unique_urls=${bookEntries.length}`);
 
+  // Stage 5: handle each book page separately — one bad page must not kill the run
   const rawRecords = [];
   for (const entry of bookEntries) {
-    const record = await extractBookRecord(entry.url, entry.sourcePage);
-    rawRecords.push(record);
+    try {
+      const record = await extractBookRecord(entry.url, entry.sourcePage);
+      rawRecords.push(record);
+    } catch (err) {
+      console.log(`FAILED — ${entry.url} (${err.message})`);
+      failedPages.push({ url: entry.url, reason: err.message });
+    }
   }
   console.log(`detail_pages=${rawRecords.length}`);
 
@@ -190,6 +241,28 @@ async function main() {
 
   console.log(`valid_records=${validRecords.length}`);
   console.log(`invalid_records=${errors.length}`);
+  console.log(`failed_pages=${failedPages.length}`);
+
+  const durationMs = Date.now() - startTime;
+
+  const runReport = {
+    start_time: new Date(startTime).toISOString(),
+    duration_ms: durationMs,
+    pages_fetched: fetchCount,
+    cache_hits: cacheHitCount,
+    valid_records: validRecords.length,
+    invalid_records: errors.length,
+    failed_pages: failedPages.length,
+    failed_page_details: failedPages
+  };
+
+  fs.writeFileSync(
+    path.join('output', 'run-report.json'),
+    JSON.stringify(runReport, null, 2)
+  );
+
+  console.log('--- Run report ---');
+  console.log(JSON.stringify(runReport, null, 2));
 }
 
-main().catch(err => console.error('Error:', err.message));
+main().catch(err => console.error('Fatal error:', err.message));
